@@ -22,6 +22,9 @@ Usage:
 
     # Evaluate against a native MLX (Apple Silicon) model — pass an .npz weight:
     python visualize_attack.py CLEAN_IMAGE --delta delta_final.npy --model yolo26n.npz
+
+    # Or force the MLX backend on an existing .pt (auto-converted on first load):
+    python visualize_attack.py CLEAN_IMAGE --delta delta_final.npy --model yolo26n.pt --mlx
 """
 
 import argparse
@@ -33,14 +36,16 @@ MODEL_PATH = "yolo26n.pt"
 IMG_SIZE = 640
 
 
-def _load_model(path):
+def _load_model(path, force_mlx=False):
     """
-    Load YOLO weights, picking the backend by file extension: an .npz weight
-    uses the native MLX implementation (yolo-mlx), anything else uses
-    ultralytics.  Returns (model, is_mlx).  is_mlx matters because the two
-    backends' plot() differ in channel order (see main()).
+    Load YOLO weights, picking the backend by file extension: an .npz/.safetensors
+    weight uses the native MLX implementation (yolo-mlx), anything else uses
+    ultralytics.  force_mlx routes any weight (including a .pt) through yolo-mlx,
+    which converts a .pt to MLX in-process on first load.  Returns (model, is_mlx).
+    is_mlx matters because the two backends' plot() differ in channel order
+    (see main()).
     """
-    if path.lower().endswith(".npz"):
+    if force_mlx or path.lower().endswith((".npz", ".safetensors")):
         from yolo26mlx import YOLO
         return YOLO(path), True
     from ultralytics import YOLO
@@ -89,6 +94,9 @@ def main():
                              "yolo26s.pt, yolo26m.pt, yolo26l.pt, yolo26x.pt "
                              "(test transfer to bigger models than the one attacked). "
                              "An .npz weight uses the native MLX backend (yolo-mlx).")
+    parser.add_argument("--mlx", action="store_true",
+                        help="force the native MLX backend (yolo-mlx) even for a "
+                             ".pt weight; the .pt is converted to MLX on first load")
     parser.add_argument("--out", default="comparison.png")
     parser.add_argument("--conf", type=float, default=0.25,
                         help="confidence threshold for displayed detections")
@@ -100,7 +108,7 @@ def main():
     elif args.adv is None:
         parser.error("provide an ADV image path or --delta")
 
-    model, is_mlx = _load_model(args.model)
+    model, is_mlx = _load_model(args.model, force_mlx=args.mlx)
 
     rc = model.predict(args.clean, imgsz=IMG_SIZE, conf=args.conf, verbose=False)[0]
     ra = model.predict(args.adv,   imgsz=IMG_SIZE, conf=args.conf, verbose=False)[0]
