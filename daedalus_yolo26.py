@@ -9,9 +9,8 @@ Key implementation notes:
   - YOLO26's one2one head detaches its feature inputs in Detect.forward to
     prevent gradient interference during model training.  We patch this out
     so gradients flow back to the input for the attack.
-  - Loss: top-300 confidence push.  We drive the 300 highest-scoring slots
-    toward 1.0 (matching YOLO26's output budget) rather than averaging over
-    all ~672K slots, which dilutes the gradient with dead slots.
+  - Loss: the paper's confidence push — mean((sigmoid(score) - 1)^2) over all
+    slots and classes (l2_yolov3.py loss1_1_x).
     No w*h term — without NMS there is nothing to exploit with tiny boxes.
   - Optimizer: mSAM (Sharpness-Aware Minimization) wrapping AdamW, with a
     linear-warmup + cosine-decay learning-rate schedule.
@@ -136,12 +135,12 @@ class Daedalus:
     Single-image Daedalus attack targeting YOLO26's one2one head.
 
     Optimises a full-image perturbation for one specific image with two goals:
-      1. Flood: drive the top-300 one2one slots toward confidence 1.0, filling
-         YOLO26's output with high-confidence spurious boxes.
+      1. Flood: drive every one2one slot's confidence toward 1.0 (paper's
+         loss), filling YOLO26's output with high-confidence spurious boxes.
       2. Suppress: drive the confidence of the clean image's *real* detections
          toward 0, so the legitimate objects vanish from the output.
 
-    Loss      : adv_weight * top300_loss
+    Loss      : adv_weight * confidence_loss
                 + suppress_weight * legit_suppression_loss
                 + l2_weight * L2 distortion
     Optimizer : mSAM (SAM) wrapping AdamW
@@ -189,9 +188,11 @@ class Daedalus:
         return torch.sigmoid(out["one2one"]["scores"])
 
     def _adv_loss(self, scores):
-        """Push the top-300 scoring slots toward confidence 1."""
-        topk = scores.reshape(scores.shape[0], -1).topk(300, dim=1).values
-        return torch.mean((topk - 1.0) ** 2)
+        """
+        Paper's confidence loss: mean squared push of every score toward 1,
+        averaged over all slots and classes (l2_yolov3.py loss1_1_x).
+        """
+        return torch.mean((scores - 1.0) ** 2)
 
     def _top_score(self, scores):
         """Mean of the top-300 scores — the quantity optimised by _adv_loss."""
