@@ -11,16 +11,42 @@ Output: a 2x2 grid PNG —
     bottom row : clean + detections     | adversarial + detections
 
 Usage:
+    # Two-image mode (single-image attack output):
     python visualize_attack.py CLEAN_IMAGE ADV_IMAGE [--out comparison.png] [--conf 0.25]
+
+    # Universal mode: build the adversarial image from a clean image + saved delta:
+    python visualize_attack.py CLEAN_IMAGE --delta adv_examples/yolo26_universal/delta_final.npy
 """
 
 import argparse
+import os
 import cv2
 import numpy as np
 from ultralytics import YOLO
 
 MODEL_PATH = "yolo26n.pt"
 IMG_SIZE = 640
+
+
+def _build_adv_from_delta(clean_path, delta_path, out_dir="."):
+    """
+    Apply a saved universal delta to a clean image, reproducing the training
+    preprocessing (square resize to IMG_SIZE, RGB, [0,1]).  Writes square 640
+    clean + adversarial PNGs so YOLO's letterbox is a no-op and both images are
+    compared on identical pixels.  Returns (clean_png_path, adv_png_path).
+    """
+    delta = np.load(delta_path)                       # (H, W, 3) RGB, signed
+    clean_bgr = cv2.resize(cv2.imread(clean_path), (IMG_SIZE, IMG_SIZE),
+                           interpolation=cv2.INTER_CUBIC)
+    clean_rgb01 = cv2.cvtColor(clean_bgr, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
+    adv_rgb01 = np.clip(clean_rgb01 + delta, 0.0, 1.0)
+    adv_bgr = cv2.cvtColor((adv_rgb01 * 255).astype(np.uint8), cv2.COLOR_RGB2BGR)
+
+    clean_png = os.path.join(out_dir, "_clean_640.png")
+    adv_png = os.path.join(out_dir, "_adv_640.png")
+    cv2.imwrite(clean_png, clean_bgr)
+    cv2.imwrite(adv_png, adv_bgr)
+    return clean_png, adv_png
 
 
 def _label(img, text):
@@ -35,11 +61,20 @@ def _label(img, text):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("clean", help="path to the clean image")
-    parser.add_argument("adv", help="path to the adversarial image")
+    parser.add_argument("adv", nargs="?", default=None,
+                        help="path to the adversarial image (omit when using --delta)")
+    parser.add_argument("--delta", default=None,
+                        help="universal delta .npy; builds adv = clip(clean + delta, 0, 1)")
     parser.add_argument("--out", default="comparison.png")
     parser.add_argument("--conf", type=float, default=0.25,
                         help="confidence threshold for displayed detections")
     args = parser.parse_args()
+
+    if args.delta:
+        args.clean, args.adv = _build_adv_from_delta(
+            args.clean, args.delta, out_dir=os.path.dirname(args.out) or ".")
+    elif args.adv is None:
+        parser.error("provide an ADV image path or --delta")
 
     model = YOLO(MODEL_PATH)
 
