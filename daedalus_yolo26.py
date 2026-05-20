@@ -601,8 +601,20 @@ class DaedalusPoster:
         )
         optimizer = mSAM([patch_w], torch.optim.Adam, rho=self.rho, lr=self.lr)
         total_steps = epochs * len(loader)
-        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-            optimizer.base_optimizer, T_max=total_steps, eta_min=self.lr * 0.01,
+        warmup_steps = max(1, int(total_steps * 0.1))
+        scheduler = torch.optim.lr_scheduler.SequentialLR(
+            optimizer.base_optimizer,
+            schedulers=[
+                torch.optim.lr_scheduler.LinearLR(
+                    optimizer.base_optimizer,
+                    start_factor=0.1, end_factor=1.0, total_iters=warmup_steps,
+                ),
+                torch.optim.lr_scheduler.CosineAnnealingLR(
+                    optimizer.base_optimizer,
+                    T_max=total_steps - warmup_steps, eta_min=self.lr * 0.01,
+                ),
+            ],
+            milestones=[warmup_steps],
         )
 
         print(
