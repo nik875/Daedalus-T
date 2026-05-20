@@ -62,6 +62,14 @@ def _load_model(path, force_mlx=False):
     return YOLO(path), False
 
 
+def _imread(path):
+    """cv2.imread that raises a clear error instead of returning None."""
+    img = cv2.imread(path)
+    if img is None:
+        raise FileNotFoundError(f"could not read image: {path}")
+    return img
+
+
 def _build_adv_from_delta(clean_path, delta_path, out_dir="."):
     """
     Apply a saved universal delta to a clean image, reproducing the training
@@ -70,7 +78,7 @@ def _build_adv_from_delta(clean_path, delta_path, out_dir="."):
     compared on identical pixels.  Returns (clean_png_path, adv_png_path).
     """
     delta = np.load(delta_path)                       # (H, W, 3) RGB, signed
-    clean_bgr = cv2.resize(cv2.imread(clean_path), (IMG_SIZE, IMG_SIZE),
+    clean_bgr = cv2.resize(_imread(clean_path), (IMG_SIZE, IMG_SIZE),
                            interpolation=cv2.INTER_CUBIC)
     clean_rgb01 = cv2.cvtColor(clean_bgr, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
     adv_rgb01 = np.clip(clean_rgb01 + delta, 0.0, 1.0)
@@ -131,8 +139,8 @@ def main():
     n_adv = len(ra.boxes)
 
     # Raw images resized to model input size (BGR for cv2 saving)
-    clean_raw = cv2.resize(cv2.imread(args.clean), (IMG_SIZE, IMG_SIZE))
-    adv_raw   = cv2.resize(cv2.imread(args.adv),   (IMG_SIZE, IMG_SIZE))
+    clean_raw = cv2.resize(_imread(args.clean), (IMG_SIZE, IMG_SIZE))
+    adv_raw   = cv2.resize(_imread(args.adv),   (IMG_SIZE, IMG_SIZE))
 
     # Annotated images: ultralytics plot() is BGR, yolo-mlx plot() is RGB.
     clean_ann = rc.plot()
