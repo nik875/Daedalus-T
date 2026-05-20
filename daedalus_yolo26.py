@@ -622,15 +622,16 @@ class DaedalusPoster:
         loss = self.adv_loss_weight * adv_loss + self.tv_weight * tv_loss
         loss.backward()
 
+        # Measure gradient norm BEFORE restoring params / zeroing grads
+        grad_norm = sum(p.grad.norm().item() ** 2 for p in self._params()
+                        if p.grad is not None) ** 0.5
+        top_score = self._top_score(scores.detach())
+
         # Restore params before optimizer step
         for p, e in zip(self._params(), e_w):
             p.data.sub_(e)
         optimizer.base_optimizer.step()
         optimizer.zero_grad()
-
-        grad_norm = sum(p.grad.norm().item() ** 2 for p in self._params()
-                        if p.grad is not None) ** 0.5
-        top_score = self._top_score(scores.detach())
 
         return adv_loss.item(), grad_norm, top_score
 
