@@ -47,6 +47,16 @@ def _load_model(path, force_mlx=False):
     """
     if force_mlx or path.lower().endswith((".npz", ".safetensors")):
         from yolo26mlx import YOLO
+        # yolo-mlx's own .pt loader assumes the `safetensors` pkg is installed;
+        # without it the converter falls back to .npz but the loader still looks
+        # for .safetensors and crashes.  Convert to a sibling .npz ourselves and
+        # load that (reused on subsequent runs).
+        if path.lower().endswith(".pt"):
+            npz_path = os.path.splitext(path)[0] + ".npz"
+            if not os.path.exists(npz_path):
+                from yolo26mlx.converters.convert import convert_yolo26_weights
+                convert_yolo26_weights(path, npz_path, verbose=False)
+            path = npz_path
         return YOLO(path), True
     from ultralytics import YOLO
     return YOLO(path), False
@@ -110,8 +120,12 @@ def main():
 
     model, is_mlx = _load_model(args.model, force_mlx=args.mlx)
 
-    rc = model.predict(args.clean, imgsz=IMG_SIZE, conf=args.conf, verbose=False)[0]
-    ra = model.predict(args.adv,   imgsz=IMG_SIZE, conf=args.conf, verbose=False)[0]
+    # yolo-mlx's predict() has no verbose kwarg; only ultralytics does.
+    predict_kwargs = {"imgsz": IMG_SIZE, "conf": args.conf}
+    if not is_mlx:
+        predict_kwargs["verbose"] = False
+    rc = model.predict(args.clean, **predict_kwargs)[0]
+    ra = model.predict(args.adv,   **predict_kwargs)[0]
 
     n_clean = len(rc.boxes)
     n_adv = len(ra.boxes)
