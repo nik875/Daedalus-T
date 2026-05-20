@@ -39,16 +39,17 @@ _original_detect_forward = Detect.forward
 
 
 def _patched_detect_forward(self, x):
+    # Always return the raw head predictions dict (pre-NMS, no postprocess),
+    # independent of self.training.  This lets us keep the whole model in
+    # eval() mode — so BatchNorm uses stable running stats and avoids the
+    # cuDNN training-mode batch_norm path — while still exposing the one2one
+    # scores the attack needs.  The one2one head's inputs are NOT detached
+    # (unlike the stock head) so gradients flow back to the input image.
     preds = self.forward_head(x, **self.one2many)
     if self.end2end:
-        one2one = self.forward_head(x, **self.one2one)  # no detach
+        one2one = self.forward_head(x, **self.one2one)
         preds = {"one2many": preds, "one2one": one2one}
-    if self.training:
-        return preds
-    y = self._inference(preds["one2one"] if self.end2end else preds)
-    if self.end2end:
-        y = self.postprocess(y.permute(0, 2, 1))
-    return y if self.export else (y, preds)
+    return preds
 
 
 Detect.forward = _patched_detect_forward
@@ -152,11 +153,11 @@ class Daedalus:
 
         yolo = YOLO(model_path)
         self.model = yolo.model.to(self.device)
-        # eval() gives stable BatchNorm (uses pretrained running stats) so the
-        # model behaves as it does in deployment.  The Detect head must stay in
-        # train() so its forward() returns the {"one2many","one2one"} dict we need.
+        # Keep the whole model in eval() so BatchNorm uses stable pretrained
+        # running stats (matching deployment) and avoids the cuDNN train-mode
+        # batch_norm path.  The patched Detect.forward returns the head dict
+        # regardless of training mode, so we don't need train() here.
         self.model.eval()
-        self.model.model[-1].train()
         for p in self.model.parameters():
             p.requires_grad_(False)
 
