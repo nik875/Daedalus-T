@@ -31,9 +31,29 @@ import argparse
 import os
 import cv2
 import numpy as np
+from ultralytics.utils.plotting import Colors
 
 MODEL_PATH = "yolo26n.pt"
 IMG_SIZE = 640
+
+# ultralytics' 20-colour palette, so both backends draw class colours identically.
+_COLORS = Colors()
+
+COCO80 = [
+    "person", "bicycle", "car", "motorcycle", "airplane", "bus", "train",
+    "truck", "boat", "traffic light", "fire hydrant", "stop sign",
+    "parking meter", "bench", "bird", "cat", "dog", "horse", "sheep", "cow",
+    "elephant", "bear", "zebra", "giraffe", "backpack", "umbrella", "handbag",
+    "tie", "suitcase", "frisbee", "skis", "snowboard", "sports ball", "kite",
+    "baseball bat", "baseball glove", "skateboard", "surfboard",
+    "tennis racket", "bottle", "wine glass", "cup", "fork", "knife", "spoon",
+    "bowl", "banana", "apple", "sandwich", "orange", "broccoli", "carrot",
+    "hot dog", "pizza", "donut", "cake", "chair", "couch", "potted plant",
+    "bed", "dining table", "toilet", "tv", "laptop", "mouse", "remote",
+    "keyboard", "cell phone", "microwave", "oven", "toaster", "sink",
+    "refrigerator", "book", "clock", "vase", "scissors", "teddy bear",
+    "hair drier", "toothbrush",
+]
 
 
 def _load_model(path, force_mlx=False):
@@ -67,6 +87,54 @@ def _imread(path):
     img = cv2.imread(path)
     if img is None:
         raise FileNotFoundError(f"could not read image: {path}")
+    return img
+
+
+def _resolve_name(names, cls_id):
+    """Class name from a model's names map, falling back to COCO when the
+    model only carries generic placeholders (yolo-mlx stores 'class0', ...)."""
+    cand = None
+    if isinstance(names, dict):
+        cand = names.get(cls_id, names.get(str(cls_id)))
+    elif isinstance(names, (list, tuple)) and 0 <= cls_id < len(names):
+        cand = names[cls_id]
+    if cand is not None:
+        s = str(cand).strip().lower()
+        if not (s.startswith("class") or s.startswith("cls")):
+            return str(cand)
+    return COCO80[cls_id] if 0 <= cls_id < len(COCO80) else f"class{cls_id}"
+
+
+def _annotate(result, is_mlx):
+    """Draw per-class coloured boxes + labels on result.orig_img (BGR out).
+
+    Replaces each backend's plot(): ultralytics' is fine but yolo-mlx's paints
+    every box red.  Drawing here gives identical, class-coloured output for both.
+    Boxes are in orig_img pixel space, so we annotate orig_img then let the
+    caller resize.
+    """
+    base = result.orig_img
+    img = cv2.cvtColor(base, cv2.COLOR_RGB2BGR) if is_mlx else base.copy()
+    boxes = result.boxes
+    if boxes is None or len(boxes) == 0:
+        return img
+
+    lw = max(round(sum(img.shape[:2]) / 2 * 0.003), 2)   # line width ~ ultralytics
+    font, fs, tf = cv2.FONT_HERSHEY_SIMPLEX, lw / 3.0, max(lw - 1, 1)
+    for i in range(len(boxes)):
+        x1, y1, x2, y2 = (int(v) for v in boxes.xyxy[i])
+        cls_id = int(boxes.cls[i])
+        color = _COLORS(cls_id, bgr=True)
+        cv2.rectangle(img, (x1, y1), (x2, y2), color, lw, cv2.LINE_AA)
+
+        label = f"{_resolve_name(result.names, cls_id)} {float(boxes.conf[i]):.2f}"
+        (tw, th), _ = cv2.getTextSize(label, font, fs, tf)
+        outside = y1 - th - 3 >= 0
+        cv2.rectangle(img, (x1, y1 - th - 3 if outside else y1),
+                      (x1 + tw, y1 if outside else y1 + th + 3), color, -1, cv2.LINE_AA)
+        txt_color = (255, 255, 255) if sum(color) < 384 else (0, 0, 0)
+        cv2.putText(img, label, (x1, y1 - 2 if outside else y1 + th + 2),
+                    font, fs, txt_color, tf, cv2.LINE_AA)
     return img
 
 
@@ -142,14 +210,10 @@ def main():
     clean_raw = cv2.resize(_imread(args.clean), (IMG_SIZE, IMG_SIZE))
     adv_raw   = cv2.resize(_imread(args.adv),   (IMG_SIZE, IMG_SIZE))
 
-    # Annotated images: ultralytics plot() is BGR, yolo-mlx plot() is RGB.
-    clean_ann = rc.plot()
-    adv_ann = ra.plot()
-    if is_mlx:
-        clean_ann = cv2.cvtColor(clean_ann, cv2.COLOR_RGB2BGR)
-        adv_ann = cv2.cvtColor(adv_ann, cv2.COLOR_RGB2BGR)
-    clean_ann = cv2.resize(clean_ann, (IMG_SIZE, IMG_SIZE))
-    adv_ann   = cv2.resize(adv_ann,   (IMG_SIZE, IMG_SIZE))
+    # Class-coloured annotations drawn here (not via backend plot()) so MLX and
+    # ultralytics look identical; yolo-mlx's own plot() paints every box red.
+    clean_ann = cv2.resize(_annotate(rc, is_mlx), (IMG_SIZE, IMG_SIZE))
+    adv_ann   = cv2.resize(_annotate(ra, is_mlx), (IMG_SIZE, IMG_SIZE))
 
     top = cv2.hconcat([_label(clean_raw, "clean"),
                        _label(adv_raw,   "adversarial")])
