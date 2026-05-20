@@ -599,7 +599,7 @@ class DaedalusPoster:
             1, 3, self.patch_size, self.patch_size,
             device=self.device, requires_grad=True,
         )
-        optimizer = mSAM([patch_w], torch.optim.Adam, rho=self.rho, lr=self.lr)
+        optimizer = mSAM([patch_w], torch.optim.AdamW, rho=self.rho, lr=self.lr)
         total_steps = epochs * len(loader)
         warmup_steps = max(1, int(total_steps * 0.1))
         scheduler = torch.optim.lr_scheduler.SequentialLR(
