@@ -485,11 +485,19 @@ class DaedalusPoster:
         return torch.sigmoid(self.model(imgs)["one2one"]["scores"])
 
     def _adv_loss(self, scores):
-        """Mean squared push of all scores toward 1: scalar."""
-        return torch.mean((scores - 1.0) ** 2)
+        """
+        Push the top-300 scoring slots toward confidence 1.
+
+        Focusing on top-K avoids diluting gradients across the ~672K slots
+        that are dead regardless of the patch.  300 matches YOLO26's output
+        budget so the loss directly targets the slots that will appear in the
+        final detection output.
+        """
+        topk = scores.reshape(scores.shape[0], -1).topk(300, dim=1).values
+        return torch.mean((topk - 1.0) ** 2)
 
     def _top_score(self, scores):
-        """Mean of top-300 scores — sensitive metric that shows early progress."""
+        """Mean of top-300 scores — the same quantity optimised by _adv_loss."""
         return scores.reshape(scores.shape[0], -1).topk(300, dim=1).values.mean().item()
 
     # ------------------------------------------------------------------
