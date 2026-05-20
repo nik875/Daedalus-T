@@ -23,7 +23,6 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 import torch.nn as nn
-import kornia.augmentation as KA
 from tqdm import tqdm
 from skimage import io
 from ultralytics import YOLO
@@ -366,18 +365,17 @@ class PatchDecoder(nn.Module):
 
 
 # ---------------------------------------------------------------------------
-# EOT compositing via kornia
+# EOT compositing — pure PyTorch, guaranteed differentiable
 # ---------------------------------------------------------------------------
 
-# Shared augmentation module — instantiated once, reused every call.
-# RandomAffine with same_on_batch=False gives each image its own random
-# scale + rotation + translation in a single differentiable op.
-_eot_aug = KA.RandomAffine(
-    degrees=10,
-    translate=(0.35, 0.35),
-    p=1.0,
-    same_on_batch=False,
-)
+def _rotation_matrix(angle_rad: torch.Tensor) -> torch.Tensor:
+    """Build (N, 2, 3) affine theta for F.affine_grid from per-image angles."""
+    cos_a = torch.cos(angle_rad)
+    sin_a = torch.sin(angle_rad)
+    zeros = torch.zeros_like(cos_a)
+    row0 = torch.stack([ cos_a, -sin_a, zeros], dim=1)
+    row1 = torch.stack([ sin_a,  cos_a, zeros], dim=1)
+    return torch.stack([row0, row1], dim=1)  # (N, 2, 3)
 
 
 def apply_patch_eot(patch, backgrounds, eot_num, scale_range=(0.15, 0.25)):
@@ -394,9 +392,10 @@ def apply_patch_eot(patch, backgrounds, eot_num, scale_range=(0.15, 0.25)):
     composites : (N * eot_num, 3, H, W)
     masks      : (N * eot_num, 1, H, W)
 
-    Gradient flow: composites → p_aug → p_canvas → F.interpolate → patch ✓
-    Using kornia's differentiable RandomAffine avoids in-place assignment,
-    which was silently breaking the gradient chain in the previous version.
+    Gradient chain: composites → p_rotated → F.grid_sample → F.interpolate → patch ✓
+
+    All ops are native PyTorch (F.interpolate, F.affine_grid, F.grid_sample,
+    F.pad, tensor arithmetic) so the gradient chain is guaranteed intact.
     """
     device = patch.device
     N, _, H, W = backgrounds.shape
@@ -404,31 +403,38 @@ def apply_patch_eot(patch, backgrounds, eot_num, scale_range=(0.15, 0.25)):
     composite_list, mask_list = [], []
 
     for _ in range(eot_num):
-        # Random patch size for this transform (controls apparent poster size)
         scale = torch.empty(1).uniform_(*scale_range).item()
         ts = max(8, int(scale * W))
 
-        # Resize patch to target size, expand to batch
-        p_batch = F.interpolate(
+        # 1. Resize patch to target size
+        p_scaled = F.interpolate(
             patch.expand(N, -1, -1, -1),
             size=(ts, ts), mode="bilinear", align_corners=False,
         )  # (N, 3, ts, ts)
 
-        # Pad patch and a matching binary mask to full canvas (patch at top-left)
-        p_canvas = F.pad(p_batch,   (0, W - ts, 0, H - ts))  # (N, 3, H, W)
-        m_canvas = F.pad(
-            torch.ones(N, 1, ts, ts, device=device),
-            (0, W - ts, 0, H - ts),
-        )  # (N, 1, H, W)
+        # 2. Rotate via affine_grid + grid_sample (fully differentiable)
+        angles = torch.empty(N, device=device).uniform_(-10.0, 10.0) * (torch.pi / 180.0)
+        theta = _rotation_matrix(angles)  # (N, 2, 3)
+        grid = F.affine_grid(theta, (N, 3, ts, ts), align_corners=False)
+        p_rotated = F.grid_sample(p_scaled, grid, mode="bilinear",
+                                  align_corners=False, padding_mode="zeros")
 
-        # Apply same random affine to patch and mask so they stay aligned
-        p_aug = _eot_aug(p_canvas)
-        m_aug = _eot_aug(m_canvas, params=_eot_aug._params).clamp(0.0, 1.0)
+        # 3. Place at a random position via F.pad — preserves gradient chain
+        max_x = max(W - ts, 1)
+        max_y = max(H - ts, 1)
+        x0 = torch.randint(0, max_x, (1,)).item()
+        y0 = torch.randint(0, max_y, (1,)).item()
+        # F.pad order: (left, right, top, bottom)
+        p_full = F.pad(p_rotated, (x0, W - x0 - ts, y0, H - y0 - ts))
 
-        # Alpha-composite patch over background
-        composites = backgrounds.detach() * (1.0 - m_aug) + p_aug * m_aug
+        # 4. Binary mask for the patch region (no-grad, it's a constant shape)
+        mask = torch.zeros(N, 1, H, W, device=device)
+        mask[:, :, y0:y0 + ts, x0:x0 + ts] = 1.0
+
+        # 5. Alpha composite
+        composites = backgrounds.detach() * (1.0 - mask) + p_full * mask
         composite_list.append(composites)
-        mask_list.append(m_aug)
+        mask_list.append(mask)
 
     return torch.cat(composite_list, dim=0), torch.cat(mask_list, dim=0)
 
