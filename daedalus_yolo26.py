@@ -158,7 +158,11 @@ class Daedalus:
 
         yolo = YOLO(model_path)
         self.model = yolo.model.to(self.device)
-        self.model.train()
+        # eval() gives stable BatchNorm (uses pretrained running stats) so the
+        # model behaves as it does in deployment.  The Detect head must stay in
+        # train() so its forward() returns the {"one2many","one2one"} dict we need.
+        self.model.eval()
+        self.model.model[-1].train()
         for p in self.model.parameters():
             p.requires_grad_(False)
 
@@ -464,7 +468,11 @@ class DaedalusPoster:
 
         yolo = YOLO(model_path)
         self.model = yolo.model.to(self.device)
-        self.model.train()
+        # eval() gives stable BatchNorm (uses pretrained running stats) so the
+        # model behaves as it does in deployment.  The Detect head must stay in
+        # train() so its forward() returns the {"one2many","one2one"} dict we need.
+        self.model.eval()
+        self.model.model[-1].train()
         for p in self.model.parameters():
             p.requires_grad_(False)
 
