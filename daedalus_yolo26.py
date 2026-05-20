@@ -21,6 +21,7 @@ import os
 import cv2
 import numpy as np
 import torch
+from tqdm import tqdm
 import torch.nn.functional as F
 from skimage import io
 from ultralytics import YOLO
@@ -596,19 +597,17 @@ class DaedalusPoster:
         for epoch in range(1, epochs + 1):
             epoch_adv, epoch_loss, n_steps = 0.0, 0.0, 0
 
-            for backgrounds in loader:
+            pbar = tqdm(loader, desc=f"epoch {epoch:3d}/{epochs}", leave=True)
+            for backgrounds in pbar:
                 backgrounds = backgrounds.to(self.device)
                 adv, total = self._step(patch_w, optimizer, backgrounds)
                 epoch_adv  += adv
                 epoch_loss += total
                 n_steps    += 1
+                pbar.set_postfix(loss=f"{total:.4f}", adv=f"{adv:.4f}")
 
             epoch_adv  /= n_steps
             epoch_loss /= n_steps
-            print(
-                f"  epoch {epoch:3d}/{epochs} | "
-                f"loss={epoch_loss:.4f} | adv={epoch_adv:.4f}"
-            )
 
             if epoch % checkpoint_every == 0:
                 self._save(patch_w, save_path, tag=f"epoch{epoch:03d}")
