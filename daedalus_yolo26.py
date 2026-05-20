@@ -532,15 +532,27 @@ class DaedalusGenerator(Daedalus):
     The L∞ bound is enforced by tanh(·)*epsilon inside G — no projection step.
     """
 
-    def __init__(self, epsilon=EPSILON, **kwargs):
+    def __init__(self, epsilon=EPSILON, fixed_input=False, **kwargs):
         super().__init__(**kwargs)
         self.epsilon = epsilon
         self.generator = PerturbationGenerator(epsilon).to(self.device)
 
+        # Diagnostic mode: condition the generator on a FIXED random tensor
+        # instead of the image.  This collapses G to a single image-independent
+        # delta — i.e. exactly the UAP case.  If training still fails to drive
+        # adv down here, the bug is in the generator/training path, not the
+        # image conditioning.
+        self.fixed_input = fixed_input
+        if fixed_input:
+            g = torch.Generator().manual_seed(0)
+            self.fixed_z = torch.randn(
+                1, 3, IMAGE_SIZE, IMAGE_SIZE, generator=g).to(self.device)
+
     def _apply(self, imgs):
         """Return adversarial images for a batch."""
-        delta = self.generator(imgs)
-        return (imgs + delta).clamp(0.0, 1.0)
+        cond = self.fixed_z if self.fixed_input else imgs
+        delta = self.generator(cond)             # (1,3,H,W) if fixed, else (N,3,H,W)
+        return (imgs + delta).clamp(0.0, 1.0)    # broadcasts over the batch
 
     def train(
         self,
@@ -565,21 +577,21 @@ class DaedalusGenerator(Daedalus):
             f"  |  batch : {batch_size}  |  epochs : {epochs}\n"
         )
 
-        # Plain AdamW — mSAM is not used here because the generator's per-parameter
-        # grad_norm is ~1e-7 at init, making the SAM perturbation rho/norm ~32000x,
-        # which destroys the network weights on the first batch.
-        optimizer = torch.optim.AdamW(self.generator.parameters(), lr=self.lr)
+        optimizer = mSAM(
+            self.generator.parameters(), torch.optim.AdamW,
+            rho=self.rho, lr=self.lr,
+        )
         total_steps  = epochs * len(loader)
         warmup_steps = max(1, int(total_steps * 0.1))
         scheduler = torch.optim.lr_scheduler.SequentialLR(
-            optimizer,
+            optimizer.base_optimizer,
             schedulers=[
                 torch.optim.lr_scheduler.LinearLR(
-                    optimizer,
+                    optimizer.base_optimizer,
                     start_factor=0.1, end_factor=1.0, total_iters=warmup_steps,
                 ),
                 torch.optim.lr_scheduler.CosineAnnealingLR(
-                    optimizer,
+                    optimizer.base_optimizer,
                     T_max=total_steps - warmup_steps, eta_min=self.lr * 0.01,
                 ),
             ],
@@ -593,6 +605,13 @@ class DaedalusGenerator(Daedalus):
             for imgs in pbar:
                 imgs = imgs.to(self.device)
 
+                # mSAM ascent — first forward pass
+                optimizer.zero_grad()
+                loss = self.adv_weight * self._adv_loss(self._scores(self._apply(imgs)))
+                loss.backward()
+                optimizer.ascent_step()
+
+                # mSAM descent — second forward pass at perturbed generator params
                 optimizer.zero_grad()
                 scores = self._scores(self._apply(imgs))
                 adv    = self._adv_loss(scores)
@@ -603,7 +622,7 @@ class DaedalusGenerator(Daedalus):
                     for p in self.generator.parameters() if p.grad is not None
                 ) ** 0.5
                 top = self._top_score(scores.detach())
-                optimizer.step()
+                optimizer.descent_step()
                 scheduler.step()
 
                 ep_adv += adv.item(); ep_top += top
@@ -685,6 +704,9 @@ if __name__ == "__main__":
     parser.add_argument("--epochs",     type=int,   default=EPOCHS)
     parser.add_argument("--batch-size", type=int,   default=BATCH_SIZE)
     parser.add_argument("--epsilon",    type=float, default=EPSILON)
+    parser.add_argument("--fixed-input", action="store_true",
+                        help="generator mode: condition on a fixed random tensor "
+                             "(collapses to UAP — architecture sanity check)")
     args = parser.parse_args()
 
     if args.mode == "universal":
@@ -695,7 +717,7 @@ if __name__ == "__main__":
             epsilon=args.epsilon,
         )
     elif args.mode == "generator":
-        DaedalusGenerator(epsilon=args.epsilon).train(
+        DaedalusGenerator(epsilon=args.epsilon, fixed_input=args.fixed_input).train(
             args.image_dir,
             epochs=args.epochs,
             batch_size=args.batch_size,
