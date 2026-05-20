@@ -577,7 +577,7 @@ class DaedalusPoster:
         dataset = SceneDataset(image_dir)
         loader = torch.utils.data.DataLoader(
             dataset, batch_size=batch_size, shuffle=True,
-            num_workers=2, pin_memory=True, drop_last=True,
+            num_workers=2, pin_memory=(self.device == "cuda"), drop_last=True,
         )
 
         # Patch in sigmoid-space: sigmoid(0) = 0.5, a neutral grey start
