@@ -565,21 +565,21 @@ class DaedalusGenerator(Daedalus):
             f"  |  batch : {batch_size}  |  epochs : {epochs}\n"
         )
 
-        optimizer = mSAM(
-            self.generator.parameters(), torch.optim.AdamW,
-            rho=self.rho, lr=self.lr,
-        )
+        # Plain AdamW — mSAM is not used here because the generator's per-parameter
+        # grad_norm is ~1e-7 at init, making the SAM perturbation rho/norm ~32000x,
+        # which destroys the network weights on the first batch.
+        optimizer = torch.optim.AdamW(self.generator.parameters(), lr=self.lr)
         total_steps  = epochs * len(loader)
         warmup_steps = max(1, int(total_steps * 0.1))
         scheduler = torch.optim.lr_scheduler.SequentialLR(
-            optimizer.base_optimizer,
+            optimizer,
             schedulers=[
                 torch.optim.lr_scheduler.LinearLR(
-                    optimizer.base_optimizer,
+                    optimizer,
                     start_factor=0.1, end_factor=1.0, total_iters=warmup_steps,
                 ),
                 torch.optim.lr_scheduler.CosineAnnealingLR(
-                    optimizer.base_optimizer,
+                    optimizer,
                     T_max=total_steps - warmup_steps, eta_min=self.lr * 0.01,
                 ),
             ],
@@ -593,13 +593,6 @@ class DaedalusGenerator(Daedalus):
             for imgs in pbar:
                 imgs = imgs.to(self.device)
 
-                # mSAM ascent — first forward pass
-                optimizer.zero_grad()
-                loss = self.adv_weight * self._adv_loss(self._scores(self._apply(imgs)))
-                loss.backward()
-                optimizer.ascent_step()
-
-                # mSAM descent — second forward pass at perturbed generator params
                 optimizer.zero_grad()
                 scores = self._scores(self._apply(imgs))
                 adv    = self._adv_loss(scores)
@@ -610,7 +603,7 @@ class DaedalusGenerator(Daedalus):
                     for p in self.generator.parameters() if p.grad is not None
                 ) ** 0.5
                 top = self._top_score(scores.detach())
-                optimizer.descent_step()
+                optimizer.step()
                 scheduler.step()
 
                 ep_adv += adv.item(); ep_top += top
